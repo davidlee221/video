@@ -8,14 +8,11 @@ import random
 import binascii
 
 
-
 with open(sys.argv[1], "rb") as f:
     binary = f.read()
 
-
 i = 13
 
-count_v, count_a = 0, 0
 codec = 0
 first = True
 while i < len(binary):
@@ -41,7 +38,6 @@ while i < len(binary):
             else:
                 s += binary[j]
         binary = binary[:i+13] + s + binary[l:]
-        count_v += 1
 
     # damage audio
     elif binary[i] == "\x08" and random.random() < 0.3:
@@ -52,15 +48,11 @@ while i < len(binary):
             else:
                 s += binary[j]
         binary = binary[:i+15] + s + binary[l:]
-        count_a += 1
-
     
     i = l+4
     
-print count_v, count_a
-print codec
 
-with open("/vmshare/fff.flv", "wb") as f:
+with open("/vmshare/out.flv", "wb") as f:
     f.write(binary)
     
 
