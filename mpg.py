@@ -13,6 +13,7 @@ import tempfile
 import time
 import gc
 
+
 ##########################
 # global elements
 ##########################
@@ -23,6 +24,7 @@ CODE = {
     }
 
 PCT = ["O", "I", "P", "B", "D", "O", "O", "O"]
+PCT_OFFSET = [0, 8, 9, 9, 8, 0, 0, 0]
 
 BUFFER_SIZE = 512 * 1024 * 1024
 
@@ -33,6 +35,7 @@ def getTime():
         new = time.time()
         yield new - old
 
+        
 class MPG:
 
     def __init__(self, src):
@@ -42,29 +45,29 @@ class MPG:
         self.audio = tempfile.TemporaryFile()        
         print "opened file : %f sec" % t.next()
 
+        ############################
+        # SYSTEM phase
+        ############################
         self.binary = self.src.read()
         self.src_size = len(self.binary)
 
-        self.pack = self.bin2pack(self.binary)
-        print "pack : %f sec" % t.next()
-
-        self.packet = self.bin2packet(self.binary)
-        print "packet : %f sec" % t.next()
+        self.packs = self.initPack()
+        self.packets = self.initPacket()
         
         self.offset_video = self.getStream(self.video, "v")
-        print "video stream : %f sec" % t.next()
-        
         self.offset_audio = self.getStream(self.audio, "a")
-        print "audio stream : %f sec" % t.next()
 
-        print "source size: %d" % os.path.getsize(src)
-        print "source size: %d" % len(self.binary)
+        ############################
+        # VIDEO phase
+        ############################
+        self.video.seek(0)
+        self.buf_v = self.video.read()
+        
+        self.seqs = self.initSeq()
+        self.frames = self.initFrame()
 
-#        self.seq = self.bin2seq(self.video)
-#        print "seq : %f sec" % t.next()
-#        self.frame = self.seq2frame()
-        print "inited : %f sec" % t.next()
-
+        print "init done! : %f sec" % t.next()
+        
 
     def __del__(self):
         self.src.close()
@@ -72,8 +75,9 @@ class MPG:
         self.audio.close()                    
         
         
-    def bin2pack(self, src):
+    def initPack(self):
 
+        src = self.binary
         packs = []
         last_pack = len(src)
 
@@ -98,20 +102,28 @@ class MPG:
         return packs
 
 
-    def bin2packet(self, src):
-        packet = []
+    def initPacket(self):
         
-        for p in self.pack:
+        src = self.binary
+        packets = []
+        
+        for p in self.packs:
             ppp = []
 
             buf = src[p[1]:p[2]]
             
             last_packet = last_i = p[2]
-            
+
             while True:
                 i = buf[:last_i].rfind("\x00\x00\x01")
                 if i == -1:
                     break
+
+                # avoiding pack ends with "\x00\x00\x01"
+                if i+3 > len(buf)-1:
+                    last_i = i
+                    continue
+                
                 if not(0xBC <= ord(buf[i+3]) <= 0xFF):
                     last_i = i
                     continue
@@ -133,19 +145,18 @@ class MPG:
                     
                 last_packet = last_i = i
                 
-            packet += reversed(ppp)
-        return packet
+            packets += reversed(ppp)
+        return packets
 
 
     def getStream(self, dst, query):
         
         offset = []
         
-        for p in filter(lambda x: x[3] == query, self.packet):
+        for p in filter(lambda x: x[3] == query, self.packets):
 
             len_p = ord(self.binary[p[1]]) * 256 + ord(self.binary[p[1]+1])
             
-#            i = p[1] + 2    # pass "packet length" area
             i = 2    # pass "packet length" area            
             
             while True:
@@ -183,12 +194,10 @@ class MPG:
         return offset
 
 
-    def bin2seq(self, _src):
+    def initSeq(self):
 
+        src = self.buf_v
         seqs = []
-        _src.seek(0)
-        src = _src.read()
-        
         last_seq = len(src)
         
         while True:
@@ -198,54 +207,38 @@ class MPG:
             else:    
                 seqs.append((i + 4, last_seq))
                 last_seq = i
-                
-        self.video_header = src[:last_seq]
+
         seqs.reverse()
         return seqs
 
     
+    def initFrame(self):
 
-    # def bin2seq(self, src):
-
-    #     seqs = []
-    #     last_seq = self.src_size
-    #     buf_size = BUFFER_SIZE
-    #     offset = last_seq - buf_size
-    #     final = False
-
-    #     if offset <= 0:
-    #         buf_size += offset
-    #         offset = 0
-    #         final = True
+        src = self.buf_v
+        frames = []
         
-    #     count = 0
-    #     while True:
-    #         src.seek(offset)
-    #         buf = src.read(buf_size)
-    #         i = buf.rfind(CODE["SEQ"])
-    #         if i == -1:
-    #             if final:
-    #                 break
-    #             else:
-    #                 offset -= buf_size
-    #         else:    
-    #             seqs.append((offset + i + 4, last_seq))
-                
-    #             last_seq = offset + i
-    #             offset = last_seq - buf_size
-            
-    #         if offset <= 0:
-    #             buf_size += offset
-    #             offset = 0
-    #             final = True
+        for s in self.seqs:
+            last = src[s[0] : s[1]].find(CODE["FRAME"])
+            while True:
+                i = src[last+4 : s[1]].find(CODE["FRAME"])
+                if i == -1:
+                    break
+                else:
+                    t = (ord(src[last+5]) & 0b00111000) >> 3
+                    frames.append((last+PCT_OFFSET[t], last+4+i, PCT[t]))
+                    last = last + 4 + i
 
-    #     src.seek(0)
-    #     self.video_header = src.read(last_seq)
-    #     seqs.reverse()
-    #     return seqs
+            t = (ord(src[last+5]) & 0b00111000) >> 3
+            frames.append((last+PCT_OFFSET[t], s[1], PCT[t]))
+
+        return frames
 
     
+    
     def output(self, dst):
+
+        self.video.seek(0)
+        self.video.write(self.buf_v)
         
         offsets = (map(lambda x:x+("v",0), self.offset_video) +
                    map(lambda x:x+("a",0), self.offset_audio))
@@ -272,19 +265,36 @@ class MPG:
         f_out.close()
 
     
-    
     def frame(self, *_type):
         query = _type
         if len(query) == 0:
             query = ["I", "P", "B", "D", "O"]
         l = []
-        for s in self.seq:
-            for f in s.frame:
-                if f.type in query:
-                    l.append(f)
-        return l
-
+        print query
+        print _type        
+        for f in self.frames:
+            if f[2] in query:
+                l.append(f)
+        self.target =  l
+        return self
     
+            
+    def glitch(self):
+        
+        for f in self.target:
+            b = chr(random.randint(30,230)) * (f[1] - f[0])
+            self.buf_v = self.buf_v[:f[0]] + b + self.buf_v[:f[1]]
+
+
+#        s = self.binary.partition("\x00\x00\x01\x01")
+#        b = s[0] + s[1]
+#        ss = s[2]
+#        for c in ss:
+#            b += chr((~(ord(c))) & 0xFF)
+#            b += chr(random.randint(20,255))
+#        self.binary = b
+
+"""        
     def remove(self, f):
         for s in self.seq:
             if f in s.frame and len(s) > 1:
@@ -292,6 +302,7 @@ class MPG:
                 s.frame[i] = s.frame[i-1] if i>1 else s.frame[i+1]
                 break
 
+            
     def swap(self, old, new):
         for s in self.seq:
             if old in s.frame:
@@ -299,6 +310,7 @@ class MPG:
                 s.frame.insert(i, copy.copy(new))
                 s.frame.remove(old)
                 break
+
             
     def slide(self):
         first = True
@@ -320,36 +332,9 @@ class MPG:
                 else:
                     ff.append(f)
             s.frame = copy.copy(ff)
-            
+"""
 
         
-    
-class MPG_Frame:
-
-
-    def __init__(self, binary):
-        self.binary = binary
-        i = (ord(binary[0]) & 0b00111000) >> 3
-        self.type = MPG_Frame.PCT[i]
-
-    def output(self, dst):
-        dst.write(CODE["FRAME"] + self.binary)
-            
-    def randomize(self):
-        b = ""
-        for i in self.binary:
-            b += chr(random.randint(20,255))
-
-#        s = self.binary.partition("\x00\x00\x01\x01")
-#        b = s[0] + s[1]
-#        ss = s[2]
-#        for c in ss:
-#            b += chr((~(ord(c))) & 0xFF)
-#            b += chr(random.randint(20,255))
-        self.binary = b
-
-        
-
         
 if __name__=="__main__":
     if len(sys.argv) != 2:
@@ -358,8 +343,7 @@ if __name__=="__main__":
 
     g = MPG(sys.argv[1])
 
-#    for f in g.frame("I"):
-#        f.randomize()
+    g.frame("I").glitch()
 
     g.output("/vmshare/gli.mpg")
 
